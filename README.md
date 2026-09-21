@@ -25,68 +25,11 @@ Custom Efficient Self-Attention:
 My attention mechanism is designed to be as lightweight and efficient as possible while still keeping the full power of modern transformer attention. I use Grouped-Query Attention (GQA) so that only a small number of key/value heads are computed, and the rest of the query heads reuse them. This drastically cuts computation and memory overhead because generating K and V is the most expensive part of attention. I also apply RoPE using precomputed cosine and sine values, which means positional encoding is basically free no repetitive recomputation every forward pass. The attention calculation itself is kept simple and clean using batched operations, and everything stays in a contiguous format so PyTorch doesn’t waste time rearranging tensors. By avoiding unnecessary concatenations, transposes, or oversized projections, the whole mechanism ends up being way faster and more efficient while still behaving like full multi-head attention.
 
 Install
-bash
-# CUDA 11.8 build works on Turing (SM75) and is lighter than the cu12x wheels
+
+CUDA 11.8 
 pip install torch --index-url https://download.pytorch.org/whl/cu118
 pip install numpy tiktoken
-pip install bitsandbytes   # optional, for --opt-8bit
-1. Data
-bash
-# your own text
-python prepare_data.py --input data/corpus.txt --out-dir data --val-frac 0.001
-
-# or a streamed HF dataset (good starter corpus for this size of model)
-python prepare_data.py --hf-dataset roneneldan/TinyStories --text-key text --out-dir data
-
-# no internet? byte-level tokenizer, vocab 257, zero downloads
-python prepare_data.py --input data/corpus.txt --out-dir data --tokenizer byte
-
-Output is train.bin / val.bin: flat uint16 token streams that training memory-maps, so the corpus never has to fit in your 16 GB of RAM.
-
-2. Train
-bash
-# IRIS002 (~142M) on 4 GB
-python train.py --model iris002 --data-dir data \
-  --seq-len 512 --micro-bs 2 --grad-accum 16 \
-  --grad-checkpoint --max-steps 40000 --lr 3e-4
-
-# IRIS001 (~50M), roomier and about 2.5x faster
-python train.py --model iris001 --data-dir data \
-  --seq-len 512 --micro-bs 6 --grad-accum 6 --max-steps 40000 --lr 6e-4
-
-Resume anytime: --resume checkpoints/iris002/last.pt. Ctrl-C saves first.
-
-Fitting in 4 GB
-
-Rough budget for IRIS002 at seq 512, micro-batch 2:
-
-item	memory
-fp32 master weights	0.57 GB
-fp16 autocast copies	0.28 GB
-gradients (fp32)	0.57 GB
-AdamW state (m, v)	1.14 GB (0.57 GB with --opt-8bit)
-activations, checkpointed	~0.4 GB
-
-If you OOM, apply in this order: --grad-checkpoint, then --micro-bs 1 --grad-accum 32, then --seq-len 256, then --opt-8bit, then --model iris001. Effective batch is micro_bs × grad_accum × seq_len; keep it near 16k–32k tokens per step and only the resident batch shrinks.
-
-Notes for this specific card: TU117 has no tensor cores, so fp16 buys you memory rather than raw matmul throughput — but memory is the binding constraint here, so it is still the right call. bf16 does not exist on Turing; the script detects this and falls back. --compile is usually a net loss on this GPU.
-
-3. Generate
-bash
-python inference.py --ckpt checkpoints/iris002/best.pt --prompt "Once upon a time"
-python inference.py --ckpt checkpoints/iris002/best.pt --chat
-python inference.py --ckpt checkpoints/iris002/best.pt --prompt "Hello" --bench
-
-Controls: --temperature (0 = greedy), --top-k, --top-p, --repetition-penalty, --num-samples, --seed, --no-stream. Use the same --tokenizer you used in prepare_data.py.
-
-Architecture as implemented
-component	choice	why
-Norm	RMSNorm, reduction in fp32	one reduction instead of two; fp32 keeps fp16 training stable
-Position	RoPE, precomputed cos/sin	relative position inside attention, no extra parameters, no recompute
-Attention	GQA (12 Q heads / 4 KV heads) + SDPA	3x smaller K/V projections and a 3x smaller KV cache
-FFN	SwiGLU	better loss per parameter than GELU MLP
-Head	tied to embedding	saves 38 M parameters at this vocab
-Precision	fp16 forward/backward, fp32 loss + weights + step	the mixed-precision scheme from the design doc
+pip install bitsandbytes 
 
 
 
